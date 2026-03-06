@@ -5,36 +5,35 @@
 #include <android/log.h>
 #include <dlfcn.h>
 #include <cstring>
+#include "dobby.h" // FetchContent ile indirdiğimiz Dobby başlığı
 
 #define LOG_TAG "VFS_CORE"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// Orijinal open fonksiyonunun referansını tutacağımız pointer
+// Orijinal open fonksiyonunun adresini tutacak pointer (Dobby bunu dolduracak)
 typedef int (*open_func_t)(const char *pathname, int flags, mode_t mode);
 open_func_t original_open = nullptr;
 
-// Kendi yazdığımız, araya giren fake_open fonksiyonu
+// Orijinal open çağrıldığında araya girecek ve işlemi devralacak fonksiyonumuz
 int fake_open(const char *pathname, int flags, mode_t mode) {
     if (pathname != nullptr) {
         std::string path(pathname);
 
-        // Anti-tamper'ın en çok sevdiği hedeflerden biri: hafıza haritası
+        // Hafıza haritası kontrolü (Hyperion vs.)
         if (path == "/proc/self/maps") {
             LOGI("VFS Intercepted: /proc/self/maps -> Redirecting to clean fake maps.");
-            // Spooflanmış, içinde hile/root izi olmayan temiz bir haritaya yönlendir.
             return original_open("/data/data/com.executor.vm/files/fake_maps", flags, mode);
         }
         
-        // Emülatör tespiti için QEMU izi kontrolü veya batarya sıcaklığı
+        // Emülatör/VM tespiti
         if (path.find("qemu") != std::string::npos || path.find("virtual") != std::string::npos) {
             LOGI("VFS Intercepted: Emulator trace search -> Blocked.");
-            // Dosya yokmuş gibi davran (No such file or directory)
             errno = ENOENT;
             return -1;
         }
 
-        // Magisk veya Root yetkisi sorgusu
+        // Root ve Magisk tespiti
         if (path == "/system/xbin/su" || path == "/system/bin/su" || path == "/sbin/.magisk") {
             LOGI("VFS Intercepted: Root check -> Masking as unrooted.");
             errno = ENOENT;
@@ -42,31 +41,35 @@ int fake_open(const char *pathname, int flags, mode_t mode) {
         }
     }
 
-    // Tehlikeli bir dosya değilse orijinal fonksiyona pasla
+    // Listede yoksa orijinal fonksiyona devam et, kimse bir şey anlamasın
     return original_open(pathname, flags, mode);
 }
 
-// Kütüphane hafızaya yüklendiğinde tetiklenen JNI_OnLoad
+// JNI_OnLoad, sistem vfscore.so'yu hafızaya aldığında otomatik çalışır
 extern "C" JNIEXPORT jint JNICALL
 JNI_OnLoad(JavaVM* vm, void* reserved) {
-    LOGI("VFS Core Engine Initializing...");
+    LOGI("VFS Core Engine Initializing with Dobby Hooking...");
 
-    // Gerçek libc.so'daki open fonksiyonunun bellek adresini al
-    void* libc_handle = dlopen("libc.so", RTLD_NOW);
-    if (libc_handle) {
-        original_open = (open_func_t)dlsym(libc_handle, "open");
+    // libc içindeki 'open' fonksiyonunun bellek adresini buluyoruz
+    void* open_ptr = dlsym(RTLD_DEFAULT, "open");
+    
+    if (open_ptr != nullptr) {
+        LOGI("VFS: Found 'open' at memory address: %p", open_ptr);
         
-        if (original_open != nullptr) {
-            LOGI("VFS: Successfully resolved original libc.so/open.");
-            // NOT: Profesyonel kullanımda burada PLT/GOT Hooking veya Inline Hooking (Dobby) uygulanarak
-            // sistemin orijinal 'open' çağrıları zorla 'fake_open'a yönlendirilir.
-            // Bu PoC mimarisinde hook hazırlığı yapılmıştır.
+        // DobbyHook ile Inline Hooking işlemi
+        // 1. Parametre: Hedef fonksiyon adresi
+        // 2. Parametre: Kendi yazdığımız fonksiyon
+        // 3. Parametre: Orijinal fonksiyona dönebilmek için Dobby'nin hazırladığı trampoline adresi
+        int hook_status = DobbyHook(open_ptr, (void *)fake_open, (void **)&original_open);
+        
+        if (hook_status == 0) { // Dobby başarısı genelde 0'dır (veya RS_SUCCESS)
+            LOGI("VFS: Successfully hooked 'open' via Dobby. We are in the matrix.");
         } else {
-            LOGE("VFS: Failed to resolve libc.so/open.");
+            LOGE("VFS: DobbyHook failed. Hook status code: %d", hook_status);
         }
-        dlclose(libc_handle);
+    } else {
+        LOGE("VFS: Failed to locate 'open' in memory (dlsym returned null).");
     }
 
     return JNI_VERSION_1_6;
 }
-
