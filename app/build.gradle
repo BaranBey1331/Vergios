@@ -5,6 +5,9 @@ plugins {
 android {
     namespace 'com.executor.vm'
     compileSdk 34
+    
+    // NDK Krizini Çözen Satır (Dobby ASM kodlarıyla uyumlu versiyon)
+    ndkVersion "23.1.7779620"
 
     defaultConfig {
         applicationId "com.executor.vm"
@@ -44,4 +47,3 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
 }
-
